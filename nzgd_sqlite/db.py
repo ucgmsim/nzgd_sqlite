@@ -10,11 +10,14 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from typing import Optional, Self
+import itertools
 
 import pandas as pd
 from intervaltree import Interval, IntervalTree
 
+from collections.abc import Iterator
 from nzgd_sqlite import orm
+from datetime import datetime
 
 
 # Enum: SoilTypes
@@ -28,6 +31,7 @@ class SoilTypesEnum(Enum):
     CLAY = "CLAY"
     GRAVEL = "GRAVEL"
     BOULDERS = "BOULDERS"
+    COBBLES = "COBBLES"
 
 
 @dataclass
@@ -84,14 +88,18 @@ class NZGDRecord:
         return cls(
             nzgd_id=record.nzgd_id,
             original_reference=record.original_reference,
-            investigation_date=record.investigation_date,
-            published_date=record.published_date,
+            investigation_date=datetime.strptime(
+                record.investigation_date, "%Y-%m-%d %H:%M:%S"
+            ).date(),
+            published_date=datetime.strptime(
+                record.published_date, "%Y-%m-%d %H:%M:%S"
+            ).date(),
             latitude=record.latitude,
             longitude=record.longitude,
-            region=record.region.name,
-            district=record.district.name,
-            city=record.city.name,
-            suburb=record.suburb.name,
+            region=record.region_id.name,
+            district=record.district_id.name,
+            city=record.city_id.name,
+            suburb=record.suburb_id.name,
         )
 
 
@@ -146,9 +154,28 @@ class SPTReport:
 
         # Create an IntervalTree for soil measurements
         soil_measurements_tree = IntervalTree()
-        for s in sorted(report.soil_measurements, key=lambda x: x.top_depth):
-            for soil_type in s.soil_types:
-                soil_measurements_tree.add(Interval(s.top_depth, s.bottom_depth, s))
+        measurements = sorted(report.soil_measurements, key=lambda x: x.top_depth)
+        if measurements:
+            for s, next in itertools.pairwise(measurements):
+                if s.top_depth == next.top_depth:
+                    continue
+                for soil_type in s.soil_types:
+                    soil_measurements_tree.add(
+                        Interval(
+                            s.top_depth,
+                            next.top_depth,
+                            SoilTypesEnum[soil_type.soil_type_id.name],
+                        )
+                    )
+            bottom_measurement = measurements[-1]
+            for soil_type in bottom_measurement.soil_types:
+                soil_measurements_tree.add(
+                    Interval(
+                        bottom_measurement.top_depth,
+                        100,
+                        SoilTypesEnum[soil_type.soil_type_id.name],
+                    )
+                )
 
         return cls(
             borehole_id=report.borehole_id,
@@ -172,6 +199,9 @@ class CPTReport:
 
     cpt_file: str
     """str: The file associated with the CPT."""
+
+    nzgd_record: NZGDRecord
+    """NZGDRecord: The NZGD record associated with the report."""
 
     measurements: pd.DataFrame = field(default_factory=pd.DataFrame)
     """pd.DataFrame: A DataFrame containing CPT measurements."""
@@ -201,6 +231,7 @@ class CPTReport:
         return cls(
             cpt_id=report.cpt_id,
             cpt_file=report.cpt_file,
+            nzgd_record=NZGDRecord.from_orm(report.nzgd_id),
             measurements=measurements_df,
         )
 
@@ -260,7 +291,10 @@ def search_spt_reports(
     max_measurement_depth: Optional[float] = None,
     min_measurement_depth: Optional[float] = None,
     region: Optional[str] = None,
-) -> list[SPTReport]:
+    district: Optional[str] = None,
+    city: Optional[str] = None,
+    suburb: Optional[str] = None,
+) -> Iterator[SPTReport]:
     """
     Search for SPT reports based on the given filters.
 
@@ -287,12 +321,21 @@ def search_spt_reports(
     region : Optional[str], optional
         The region to filter by.
 
+    district : Optional[str], optional
+        The district to filter by.
+
+    city : Optional[str], optional
+        The city to filter by.
+
+    suburb : Optional[str], optional
+        The suburb to filter by.
+
     Returns
     -------
     list[SPTReport]
         A list of SPTReport instances that match the filter criteria.
     """
-    return [
+    return (
         SPTReport.from_orm(report)
         for report in orm.search_spt_reports(
             borehole_id=borehole_id,
@@ -304,6 +347,65 @@ def search_spt_reports(
             original_reference=original_reference,
             max_measurement_depth=max_measurement_depth,
             min_measurement_depth=min_measurement_depth,
-            region_name=region,
+            region=region,
+            city=city,
+            district=district,
+            suburb=suburb,
         )
-    ]
+    )
+
+
+def search_cpt_reports(
+    cpt_id: Optional[int] = None,
+    nzgd_id: Optional[int] = None,
+    original_reference: Optional[str] = None,
+    region: Optional[str] = None,
+    district: Optional[str] = None,
+    city: Optional[str] = None,
+    suburb: Optional[str] = None,
+    max_measurement_depth: Optional[float] = None,
+    min_measurement_depth: Optional[float] = None,
+) -> Iterator[CPTReport]:
+    """
+    Search for CPT reports based on the given filters.
+
+    Parameters
+    ----------
+    cpt_id : Optional[int], optional
+        The CPT report ID to filter by.
+    nzgd_id : Optional[int], optional
+        The NZGD ID to filter by.
+    original_reference : Optional[str], optional
+        The original reference to filter by.
+    region : Optional[str], optional
+        The region to filter by.
+    district : Optional[str], optional
+        The district to filter by.
+    city : Optional[str], optional
+        The city to filter by.
+    suburb : Optional[str], optional
+        The suburb to filter by.
+    max_measurement_depth : Optional[float], optional
+        The maximum measurement depth to filter by.
+    min_measurement_depth : Optional[float], optional
+        The minimum measurement depth to filter by.
+
+    Returns
+    -------
+    Iterator[CPTReport]
+        An iterator of CPTReport instances that match the filter criteria.
+    """
+    return (
+        CPTReport.from_orm(report)
+        for report in orm.search_cpt_reports(
+            cpt_id=cpt_id,
+            nzgd_id=nzgd_id,
+            original_reference=original_reference,
+            region=region,
+            district=district,
+            city=city,
+            suburb=suburb,
+            max_measurement_depth=max_measurement_depth,
+            min_measurement_depth=min_measurement_depth,
+        )
+    )

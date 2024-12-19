@@ -9,6 +9,7 @@ with a SQLite database and provides models and query functions for geotechnical 
 
 from typing import Optional
 
+from collections.abc import Iterator
 from peewee import (
     JOIN,
     CompositeKey,
@@ -105,16 +106,16 @@ class NZGDRecord(BaseModel):
     longitude = FloatField()
     """float: The longitude coordinate of the investigation location."""
 
-    region = ForeignKeyField(Region, backref="region")
+    region_id = ForeignKeyField(Region, backref="region")
     """int: The foreign key referencing the region."""
 
-    district = ForeignKeyField(District, backref="district")
+    district_id = ForeignKeyField(District, backref="district")
     """int: The foreign key referencing the district."""
 
-    city = ForeignKeyField(City, backref="city")
+    city_id = ForeignKeyField(City, backref="city")
     """int: The foreign key referencing the city."""
 
-    suburb = ForeignKeyField(Suburb, backref="suburb")
+    suburb_id = ForeignKeyField(Suburb, backref="suburb")
     """int: The foreign key referencing the suburb."""
 
 
@@ -243,9 +244,6 @@ class SoilMeasurements(BaseModel):
     top_depth = FloatField()
     """float: The top depth of the soil layer."""
 
-    bottom_depth = FloatField()
-    """float: The bottom depth of the soil layer."""
-
 
 class SoilTypes(BaseModel):
     """
@@ -274,6 +272,13 @@ class SoilMeasurementSoilType(BaseModel):
         primary_key = CompositeKey("soil_measurement_id", "soil_type_id")
 
 
+class CPTMaxDepth(BaseModel):
+    cpt_id = ForeignKeyField(
+        CPTReport, primary_key=True, backref="max_depth", on_delete="CASCADE"
+    )  # cpt_id as both PK and FK
+    max_depth = FloatField()
+
+
 def search_spt_reports(
     borehole_id: Optional[int] = None,
     min_efficiency: Optional[float] = None,
@@ -284,11 +289,11 @@ def search_spt_reports(
     original_reference: Optional[str] = None,
     max_measurement_depth: Optional[float] = None,
     min_measurement_depth: Optional[float] = None,
-    region_name: Optional[str] = None,
-    district_name: Optional[str] = None,
-    city_name: Optional[str] = None,
-    suburb_name: Optional[str] = None,
-) -> list[SPTReport]:
+    region: Optional[str] = None,
+    district: Optional[str] = None,
+    city: Optional[str] = None,
+    suburb: Optional[str] = None,
+) -> Iterator[SPTReport]:
     """
     Search for SPT (Standard Penetration Test) reports based on various filters.
 
@@ -323,8 +328,8 @@ def search_spt_reports(
 
     Returns
     -------
-    list of SPTReport
-        A list of `SPTReport` objects that match the specified criteria.
+    Iterator of SPTReport
+        A Iterator of `SPTReport` objects that match the specified criteria.
     """
     # Start with SPTReport and join related NZGDRecord
     query = SPTReport.select(SPTReport).join(NZGDRecord, JOIN.INNER)
@@ -344,13 +349,13 @@ def search_spt_reports(
         query = query.where(NZGDRecord.nzgd_id == nzgd_id)
     if original_reference is not None:
         query = query.where(NZGDRecord.original_reference.contains(original_reference))
-    if region_name is not None:
+    if region is not None:
         query = (
             query.switch(NZGDRecord)
             .join(Region, JOIN.INNER, on=(NZGDRecord.region_id == Region.region_id))
-            .where(Region.name == region_name)
+            .where(Region.name == region)
         )
-    if district_name is not None:
+    if district is not None:
         query = (
             query.switch(NZGDRecord)
             .join(
@@ -358,19 +363,19 @@ def search_spt_reports(
                 JOIN.INNER,
                 on=(NZGDRecord.district_id == District.district_id),
             )
-            .where(District.name == district_name)
+            .where(District.name == district)
         )
-    if city_name is not None:
+    if city is not None:
         query = (
             query.switch(NZGDRecord)
             .join(City, JOIN.INNER, on=(NZGDRecord.city_id == City.city_id))
-            .where(City.name == city_name)
+            .where(City.name == city)
         )
-    if suburb_name is not None:
+    if suburb is not None:
         query = (
             query.switch(NZGDRecord)
             .join(Suburb, JOIN.INNER, on=(NZGDRecord.suburb_id == Suburb.suburb_id))
-            .where(Suburb.name == suburb_name)
+            .where(Suburb.name == suburb)
         )
     # Apply filter for maximum measurement depth
     if max_measurement_depth or min_measurement_depth:
@@ -385,7 +390,104 @@ def search_spt_reports(
             query = query.having(fn.MAX(SPTMeasurements.depth) >= min_measurement_depth)
 
     # Execute query and return results
-    return list(query)
+    return iter(query)
+
+
+def search_cpt_reports(
+    cpt_id: Optional[int] = None,
+    nzgd_id: Optional[int] = None,
+    original_reference: Optional[str] = None,
+    region: Optional[str] = None,
+    district: Optional[str] = None,
+    city: Optional[str] = None,
+    suburb: Optional[str] = None,
+    max_measurement_depth: Optional[float] = None,
+    min_measurement_depth: Optional[float] = None,
+) -> Iterator[CPTReport]:
+    """
+    Search for CPT (Cone Penetration Test) reports based on various filters.
+
+    Parameters
+    ----------
+    cpt_id : int, optional
+        Specific CPT report ID to filter results.
+    nzgd_id : int, optional
+        ID of the associated NZGDRecord to filter results.
+    original_reference : str, optional
+        Filter by a substring of the NZGDRecord's original reference.
+    region : str, optional
+        Name of the region to filter results.
+    district_name : str, optional
+        Name of the district to filter results.
+    city_name : str, optional
+        Name of the city to filter results.
+    suburb : str, optional
+        Name of the suburb to filter results.
+    max_measurement_depth : float, optional
+        Maximum depth of measurements in the CPT report.
+    min_measurement_depth : float, optional
+        Minimum depth of measurements in the CPT report.
+
+    Returns
+    -------
+    Iterator of CPTReport
+        A Iterator of `CPTReport` objects that match the specified criteria.
+    """
+    # Start with CPTReport and join related NZGDRecord
+    query = CPTReport.select(CPTReport).join(NZGDRecord, JOIN.INNER)
+
+    # Apply filters for CPTReport fields
+    if cpt_id is not None:
+        query = query.where(CPTReport.cpt_id == cpt_id)
+    if nzgd_id is not None:
+        query = query.where(NZGDRecord.nzgd_id == nzgd_id)
+    if original_reference is not None:
+        query = query.where(NZGDRecord.original_reference.contains(original_reference))
+
+    # Apply filters for location-related fields
+    if region is not None:
+        query = (
+            query.switch(NZGDRecord)
+            .join(Region, JOIN.INNER, on=(NZGDRecord.region_id == Region.region_id))
+            .where(Region.name == region)
+        )
+    if district is not None:
+        query = (
+            query.switch(NZGDRecord)
+            .join(
+                District,
+                JOIN.INNER,
+                on=(NZGDRecord.district_id == District.district_id),
+            )
+            .where(District.name == district)
+        )
+    if city is not None:
+        query = (
+            query.switch(NZGDRecord)
+            .join(City, JOIN.INNER, on=(NZGDRecord.city_id == City.city_id))
+            .where(City.name == city)
+        )
+    if suburb is not None:
+        query = (
+            query.switch(NZGDRecord)
+            .join(Suburb, JOIN.INNER, on=(NZGDRecord.suburb_id == Suburb.suburb_id))
+            .where(Suburb.name == suburb)
+        )
+
+    # Apply filter for measurement depth
+    if max_measurement_depth or min_measurement_depth:
+        query = (
+            query.switch(CPTReport)
+            .join(CPTMaxDepth, JOIN.INNER)
+            .group_by(CPTReport.cpt_id)
+        )
+        if max_measurement_depth:
+            query = query.having((CPTMaxDepth.max_depth) <= max_measurement_depth)
+        if min_measurement_depth:
+            query = query.having((CPTMaxDepth.max_depth) >= min_measurement_depth)
+
+    # Execute query and return results
+    return iter(query)
 
 
 def initialize_db():
